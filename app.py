@@ -1,6 +1,7 @@
 import concurrent.futures
 import io
 import sqlite3
+import time  # Untuk jeda retry
 import zipfile
 from datetime import datetime
 
@@ -15,7 +16,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(
-    layout="wide", page_title="Wifi.id Usage Dashboard v5.1", page_icon="🔐"
+    layout="wide", page_title="Wifi.id Usage Dashboard v6.0", page_icon="💎"
 )
 
 # --- DATABASE SETUP (SQLITE) ---
@@ -89,8 +90,8 @@ PROJECT_CONFIG = {
 USERS = {"admin": "admin123", "team_jateng": "jateng2026", "user_lapangan": "lapangan1"}
 
 
-# --- 1. FUNGSI FETCH DATA ---
-def fetch_usage_data(session_id, vo_id, loc_id, start_date, end_date):
+# --- 1. FUNGSI FETCH DATA (DENGAN RETRY LOGIC) ---
+def fetch_usage_data(session_id, vo_id, loc_id, start_date, end_date, max_retries=3):
     url = "https://venue.wifi.id/vdash/dashboard/plinechart?"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -114,53 +115,64 @@ def fetch_usage_data(session_id, vo_id, loc_id, start_date, end_date):
         "ssid": "",
         "sitename": "",
     }
-    try:
-        response = requests.post(
-            url, headers=headers, data=payload, verify=False, timeout=30
-        )
-        if response.status_code != 200:
-            return None
+
+    # RETRY LOOP
+    for attempt in range(max_retries):
         try:
-            data = response.json()
-        except ValueError:
-            return None
-        if not data:
-            return pd.DataFrame()
+            response = requests.post(
+                url, headers=headers, data=payload, verify=False, timeout=30
+            )
+            if response.status_code != 200:
+                time.sleep(1)  # Jeda dulu sebelum retry
+                continue  # Coba lagi
 
-        df = pd.DataFrame(data)
-        if "PERIODE" in df.columns:
-            df["date"] = pd.to_datetime(df["PERIODE"], format="%Y%m%d", errors="coerce")
-            if "USAGES" in df.columns:
-                df["usage_bytes"] = pd.to_numeric(df["USAGES"], errors="coerce").fillna(
-                    0
+            try:
+                data = response.json()
+            except ValueError:
+                return None
+
+            if not data:
+                return pd.DataFrame()
+
+            df = pd.DataFrame(data)
+            if "PERIODE" in df.columns:
+                df["date"] = pd.to_datetime(
+                    df["PERIODE"], format="%Y%m%d", errors="coerce"
                 )
-                df["total_usage_gb"] = df["usage_bytes"] / (1024**3)
+                if "USAGES" in df.columns:
+                    df["usage_bytes"] = pd.to_numeric(
+                        df["USAGES"], errors="coerce"
+                    ).fillna(0)
+                    df["total_usage_gb"] = df["usage_bytes"] / (1024**3)
+                else:
+                    df["total_usage_gb"] = 0
+                if "TRAFIK" in df.columns:
+                    df["connected_user"] = (
+                        pd.to_numeric(df["TRAFIK"], errors="coerce")
+                        .fillna(0)
+                        .astype(int)
+                    )
+                else:
+                    df["connected_user"] = 0
+
+                df = df.sort_values("date")
+                return df[["date", "connected_user", "total_usage_gb"]]
             else:
-                df["total_usage_gb"] = 0
-            if "TRAFIK" in df.columns:
-                df["connected_user"] = (
-                    pd.to_numeric(df["TRAFIK"], errors="coerce").fillna(0).astype(int)
-                )
-            else:
-                df["connected_user"] = 0
+                return pd.DataFrame()
 
-            # PENTING: Sort berdasarkan tanggal asli dulu sebelum diubah jadi string
-            df = df.sort_values("date")
-            return df[["date", "connected_user", "total_usage_gb"]]
-        else:
-            return pd.DataFrame()
-    except Exception:
-        return None
+        except Exception:
+            time.sleep(1)  # Jeda jika koneksi error
+            continue  # Coba lagi
+
+    return None  # Nyerah setelah 3x percobaan
 
 
-# --- 2. FUNGSI CHART (UPDATED: CATEGORY AXIS) ---
+# --- 2. FUNGSI CHART (CATEGORY AXIS) ---
 def create_chart(df, title_text):
-    # Buat kolom baru format String agar dibaca sebagai KATEGORI (Label), bukan Time Series
-    df["date_str"] = df["date"].dt.strftime("%d %b")  # Contoh: "12 Jan"
+    df["date_str"] = df["date"].dt.strftime("%d %b")
 
     fig = go.Figure()
 
-    # Gunakan x=df['date_str'] bukan df['date']
     fig.add_trace(
         go.Scatter(
             x=df["date_str"],
@@ -203,15 +215,9 @@ def create_chart(df, title_text):
             x=0,
             font=dict(size=14),
         ),
-        # --- UPDATE UTAMA DI SINI ---
         xaxis=dict(
-            type="category",  # INI KUNCINYA: Memaksa sumbu X jadi Kategori (seperti A, B, C)
-            showgrid=False,
-            tickangle=-45,
-            tickfont=dict(size=12),
-            # Kita hapus tickvals karena type='category' otomatis menampilkan semua data yang ada
+            type="category", showgrid=False, tickangle=-45, tickfont=dict(size=12)
         ),
-        # ----------------------------
         yaxis=dict(
             title=dict(text="Connected User", font=dict(color="#2980b9", size=14)),
             tickfont=dict(color="#2980b9", size=12),
@@ -233,13 +239,23 @@ def create_chart(df, title_text):
 def process_single_location(row_data, phpsess, vo_id, s_date, e_date):
     loc_id = row_data["LOC_ID"]
     loc_name = row_data["SITE_NAME"]
+
+    # Fungsi fetch sudah punya auto-retry didalamnya
     df = fetch_usage_data(phpsess, vo_id, loc_id, s_date, e_date)
+
     if df is None or df.empty:
         return None
 
     title_html = f"<b>{loc_name} ({loc_id})</b><br><span style='font-size: 16px; color: gray;'>{s_date.strftime('%d/%m/%Y')} - {e_date.strftime('%d/%m/%Y')}</span>"
+
+    # Generate Chart
     fig = create_chart(df, title_html)
+
+    # Render Image (Bagian Paling Berat di CPU)
     img_bytes = fig.to_image(format="png", width=1400, height=700, scale=2)
+
+    # MEMORY CLEANUP: Hapus object figure setelah jadi bytes
+    del fig
 
     clean_name = "".join([c if c.isalnum() else "_" for c in loc_name])
     filename = f"{clean_name}_{loc_id}.png"
@@ -353,7 +369,7 @@ if check_authentication():
                 "Rentang Tanggal", value=(datetime(2026, 1, 1), datetime(2026, 1, 31))
             )
 
-        tab1, tab2 = st.tabs(["📊 Live Preview", "📦 Bulk Download (Turbo)"])
+        tab1, tab2 = st.tabs(["📊 Live Preview", "📦 Bulk Download (Stabil)"])
 
         with tab1:
             if not active_sess:
@@ -396,18 +412,38 @@ if check_authentication():
                             st.error("Data kosong.")
 
         with tab2:
-            st.header(f"🚀 Turbo Download: {selected_project}")
+            st.header(f"🚀 Download Manager: {selected_project}")
+
+            # FITUR BARU: PILIHAN KECEPATAN
+            st.info(
+                "💡 **Tips:** Pilih 'Safe Mode' jika koneksi tidak stabil atau server spesifikasi rendah."
+            )
+            speed_mode = st.radio(
+                "Pilih Mode Download:",
+                (
+                    "Safe Mode (Stabil, 3 Concurrent)",
+                    "Turbo Mode (Cepat, 8 Concurrent)",
+                ),
+                index=0,
+            )
+
+            # Tentukan max_workers berdasarkan pilihan
+            workers = 3 if "Safe" in speed_mode else 8
+
             if len(d_range) == 2:
                 s_date, e_date = d_range
-                if st.button("Start Bulk Download"):
+                if st.button(f"Mulai Download ({len(active_df)} Lokasi)"):
                     if not active_sess:
                         st.error("Session ID kosong!")
                         st.stop()
+
                     zip_buffer = io.BytesIO()
                     progress_text = st.empty()
                     my_bar = st.progress(0)
+
+                    # LOGIC UTAMA: CONCURRENT DOWNLOAD
                     with concurrent.futures.ThreadPoolExecutor(
-                        max_workers=5
+                        max_workers=workers
                     ) as executor:
                         future_to_loc = {
                             executor.submit(
@@ -422,6 +458,7 @@ if check_authentication():
                         }
                         completed_count = 0
                         total_items = len(active_df)
+
                         with zipfile.ZipFile(
                             zip_buffer, "a", zipfile.ZIP_DEFLATED, False
                         ) as zf:
@@ -432,7 +469,7 @@ if check_authentication():
                                 pct = completed_count / total_items
                                 my_bar.progress(pct)
                                 progress_text.text(
-                                    f"Downloading {completed_count}/{total_items}..."
+                                    f"Processing {completed_count}/{total_items}..."
                                 )
                                 try:
                                     res = future.result()
@@ -441,9 +478,10 @@ if check_authentication():
                                         zf.writestr(fname, img_data)
                                 except Exception:
                                     pass
-                    progress_text.success("✅ Selesai!")
+
+                    progress_text.success("✅ Download Selesai!")
                     st.download_button(
-                        "💾 Download ZIP",
+                        "💾 Simpan ZIP File",
                         zip_buffer.getvalue(),
                         f"Chart_{selected_project}.zip",
                         "application/zip",
