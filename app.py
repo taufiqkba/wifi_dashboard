@@ -1,6 +1,6 @@
 import concurrent.futures
 import io
-import sqlite3  # Database Library
+import sqlite3
 import zipfile
 from datetime import datetime
 
@@ -15,7 +15,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(
-    layout="wide", page_title="Wifi.id Usage Dashboard v4", page_icon="💾"
+    layout="wide", page_title="Wifi.id Usage Dashboard v5", page_icon="🔐"
 )
 
 # --- DATABASE SETUP (SQLITE) ---
@@ -23,7 +23,6 @@ DB_NAME = "wifi_locations.db"
 
 
 def init_db():
-    """Membuat tabel database jika belum ada"""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("""
@@ -39,13 +38,9 @@ def init_db():
 
 
 def save_to_db(df, project_name):
-    """Menyimpan data dari Excel ke Database"""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    # Hapus data lama project ini (replace)
     c.execute("DELETE FROM locations WHERE project_name = ?", (project_name,))
-
-    # Insert data baru
     data_tuples = [
         (project_name, row["LOC_ID"], row["SITE_NAME"]) for _, row in df.iterrows()
     ]
@@ -53,26 +48,21 @@ def save_to_db(df, project_name):
         "INSERT INTO locations (project_name, loc_id, site_name) VALUES (?, ?, ?)",
         data_tuples,
     )
-
     conn.commit()
     conn.close()
 
 
 def load_from_db(project_name):
-    """Mengambil data dari Database"""
     conn = sqlite3.connect(DB_NAME)
     query = "SELECT loc_id, site_name FROM locations WHERE project_name = ?"
     df = pd.read_sql_query(query, conn, params=(project_name,))
     conn.close()
-
     if not df.empty:
-        # Kembalikan nama kolom agar sesuai logika aplikasi
         df.columns = ["LOC_ID", "SITE_NAME"]
     return df
 
 
 def delete_project_data(project_name):
-    """Menghapus data proyek tertentu"""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("DELETE FROM locations WHERE project_name = ?", (project_name,))
@@ -80,7 +70,6 @@ def delete_project_data(project_name):
     conn.close()
 
 
-# Inisialisasi DB saat aplikasi jalan
 init_db()
 
 # --- INISIALISASI SESSION STATE ---
@@ -92,25 +81,26 @@ PROJECT_CONFIG = {
     "Kecamatan Berdaya": {"vo_id": "15557"},
     "Pendidikan": {"vo_id": "13231"},
     "Pelayanan Publik": {"vo_id": "12945"},
-    "WMS Polda Jateng": {"vo_id": "15557"},
+    "POLDA Jawa Tengah 1": {"vo_id": "13329"},
     "Lainnya": {"vo_id": "15557"},
 }
+
+# --- CREDENTIALS (USERNAME & PASSWORD) ---
+# Format: "username": "password"
+USERS = {"admin": "admin123", "team_jateng": "jateng2026", "user_lapangan": "lapangan1"}
 
 
 # --- 1. FUNGSI FETCH DATA ---
 def fetch_usage_data(session_id, vo_id, loc_id, start_date, end_date):
-    url = "https://venue.wifi.id/vdash/dashboard/plinechart?"
-
+    url = "https://venue.wifi.id/vdash/dashboard/plinechart"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Cookie": f"PHPSESSID={session_id}",
         "X-Requested-With": "XMLHttpRequest",
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     }
-
     s_date_clean = start_date.strftime("%Y%m%d")
     e_date_clean = end_date.strftime("%Y%m%d")
-
     payload = {
         "optionsRadios": "3",
         "startdate": s_date_clean,
@@ -125,28 +115,22 @@ def fetch_usage_data(session_id, vo_id, loc_id, start_date, end_date):
         "ssid": "",
         "sitename": "",
     }
-
     try:
         response = requests.post(
             url, headers=headers, data=payload, verify=False, timeout=30
         )
-
         if response.status_code != 200:
             return None
-
         try:
             data = response.json()
         except ValueError:
             return None
-
         if not data:
             return pd.DataFrame()
 
         df = pd.DataFrame(data)
-
         if "PERIODE" in df.columns:
             df["date"] = pd.to_datetime(df["PERIODE"], format="%Y%m%d", errors="coerce")
-
             if "USAGES" in df.columns:
                 df["usage_bytes"] = pd.to_numeric(df["USAGES"], errors="coerce").fillna(
                     0
@@ -154,59 +138,49 @@ def fetch_usage_data(session_id, vo_id, loc_id, start_date, end_date):
                 df["total_usage_gb"] = df["usage_bytes"] / (1024**3)
             else:
                 df["total_usage_gb"] = 0
-
             if "TRAFIK" in df.columns:
                 df["connected_user"] = (
                     pd.to_numeric(df["TRAFIK"], errors="coerce").fillna(0).astype(int)
                 )
             else:
                 df["connected_user"] = 0
-
             df = df.sort_values("date")
             return df[["date", "connected_user", "total_usage_gb"]]
         else:
             return pd.DataFrame()
-
     except Exception:
         return None
 
 
-# --- 2. FUNGSI CHART (UPDATED: LEBIH TEBAL) ---
+# --- 2. FUNGSI CHART ---
 def create_chart(df, title_text):
     fig = go.Figure()
-
-    # Line 1: Connected User (Biru - Tebal 5)
     fig.add_trace(
         go.Scatter(
             x=df["date"],
             y=df["connected_user"],
             name="Connected User",
             mode="lines+markers",
-            # UPDATE: width=5 agar tebal di Word
             line=dict(color="#2980b9", width=5, shape="spline"),
-            marker=dict(size=8),  # Marker juga diperbesar sedikit
+            marker=dict(size=8),
             yaxis="y",
         )
     )
-
-    # Line 2: Total Usage (Merah - Tebal 5 - Solid)
     fig.add_trace(
         go.Scatter(
             x=df["date"],
             y=df["total_usage_gb"],
             name="Total Usage (GB)",
             mode="lines+markers",
-            # UPDATE: width=5 agar tebal di Word
             line=dict(color="#c0392b", width=5, shape="spline"),
             marker=dict(size=8),
             yaxis="y2",
         )
     )
-
     fig.update_layout(
         title=dict(
             text=title_text,
-            font=dict(size=22, color="black"),  # Pastikan hitam pekat
+            font=dict(size=22, color="black"),
             y=0.95,
             x=0.01,
             xanchor="left",
@@ -219,7 +193,7 @@ def create_chart(df, title_text):
             y=1.02,
             xanchor="left",
             x=0,
-            font=dict(size=14),  # Legend font diperbesar
+            font=dict(size=14),
         ),
         xaxis=dict(
             showgrid=False,
@@ -250,102 +224,97 @@ def create_chart(df, title_text):
 def process_single_location(row_data, phpsess, vo_id, s_date, e_date):
     loc_id = row_data["LOC_ID"]
     loc_name = row_data["SITE_NAME"]
-
     df = fetch_usage_data(phpsess, vo_id, loc_id, s_date, e_date)
-
     if df is None or df.empty:
         return None
-
-    title_html = (
-        f"<b>{loc_name} ({loc_id})</b><br>"
-        f"<span style='font-size: 16px; color: gray;'>{s_date.strftime('%d/%m/%Y')} - {e_date.strftime('%d/%m/%Y')}</span>"
-    )
-
+    title_html = f"<b>{loc_name} ({loc_id})</b><br><span style='font-size: 16px; color: gray;'>{s_date.strftime('%d/%m/%Y')} - {e_date.strftime('%d/%m/%Y')}</span>"
     fig = create_chart(df, title_html)
     img_bytes = fig.to_image(format="png", width=1400, height=700, scale=2)
-
     clean_name = "".join([c if c.isalnum() else "_" for c in loc_name])
     filename = f"{clean_name}_{loc_id}.png"
     return (filename, img_bytes)
 
 
-# --- 4. SECURITY ---
-def check_password():
-    if "password_correct" not in st.session_state:
-        st.session_state["password_correct"] = False
+# --- 4. SECURITY (LOGIN USERNAME & PASSWORD) ---
+def login_page():
+    st.header("🔐 Login Dashboard")
 
-    def password_entered():
-        if st.session_state["password"] == "admin123":
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]
-        else:
-            st.error("Password salah")
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submit = st.form_submit_button("Login")
 
-    if not st.session_state["password_correct"]:
-        st.text_input(
-            "Password", type="password", on_change=password_entered, key="password"
-        )
+        if submit:
+            if username in USERS and USERS[username] == password:
+                st.session_state["authenticated"] = True
+                st.session_state["user"] = username
+                st.success("Login berhasil!")
+                st.rerun()
+            else:
+                st.error("Username atau Password salah.")
+
+
+def check_authentication():
+    if "authenticated" not in st.session_state:
+        st.session_state["authenticated"] = False
+
+    if not st.session_state["authenticated"]:
+        login_page()
         return False
     return True
 
 
 # --- MAIN APP ---
-if check_password():
-    st.sidebar.title("🎛️ Control Panel")
+if check_authentication():
+    # LOGOUT BUTTON DI SIDEBAR
+    with st.sidebar:
+        st.write(f"👤 Login sebagai: **{st.session_state['user']}**")
+        if st.button("Logout"):
+            st.session_state["authenticated"] = False
+            st.rerun()
+        st.title("🎛️ Control Panel")
 
     # A. PROYEK
     selected_project = st.sidebar.selectbox(
         "📂 Pilih Proyek Aktif", list(PROJECT_CONFIG.keys())
     )
     current_vo_id = PROJECT_CONFIG[selected_project]["vo_id"]
-
     st.sidebar.markdown("---")
 
-    # B. SESSION (Persistent Input)
+    # B. SESSION
     st.sidebar.subheader(f"🔑 Session ID: {selected_project}")
     default_val = st.session_state["project_sessions"].get(selected_project, "")
     new_sess = st.sidebar.text_input(
         "PHPSESSID", value=default_val, type="password", key=f"sess_{selected_project}"
     )
     st.session_state["project_sessions"][selected_project] = new_sess
-
     st.sidebar.markdown("---")
 
-    # C. DATA MANAGEMENT (DATABASE)
+    # C. DATABASE
     st.sidebar.subheader(f"💾 Database Lokasi")
-
-    # Cek apakah data sudah ada di DB?
     active_df = load_from_db(selected_project)
 
     if not active_df.empty:
-        # DATA SUDAH ADA
         st.sidebar.success(f"✅ {len(active_df)} Lokasi Tersimpan!")
-        st.sidebar.caption("Data dimuat dari Database.")
-
-        # Opsi Hapus Data
         with st.sidebar.expander("⚠️ Atur Ulang Data"):
             if st.button(f"Hapus Data {selected_project}", type="primary"):
                 delete_project_data(selected_project)
-                st.rerun()  # Refresh halaman
+                st.rerun()
     else:
-        # DATA BELUM ADA - MUNCULKAN UPLOAD
         st.sidebar.warning("Data lokasi belum ada. Upload Excel.")
         uploaded_file = st.sidebar.file_uploader(
             f"Upload Excel {selected_project}",
             type=["xlsx"],
             key=f"file_{selected_project}",
         )
-
         if uploaded_file:
             try:
                 df_temp = pd.read_excel(uploaded_file)
                 df_temp.columns = [
                     c.strip().upper().replace(" ", "_") for c in df_temp.columns
                 ]
-
                 col_loc_id = None
                 col_site_name = None
-
                 for col in df_temp.columns:
                     if "LOC" in col:
                         col_loc_id = col
@@ -362,19 +331,15 @@ if check_password():
                 if col_loc_id and col_site_name:
                     df_clean = df_temp[[col_loc_id, col_site_name]].copy()
                     df_clean.columns = ["LOC_ID", "SITE_NAME"]
-
-                    # SIMPAN KE DB
                     save_to_db(df_clean, selected_project)
                     st.sidebar.success("Disimpan ke Database!")
-                    st.rerun()  # Refresh agar langsung masuk mode "Data Tersimpan"
+                    st.rerun()
                 else:
                     st.sidebar.error("❌ Gagal mendeteksi kolom LOC ID atau Nama.")
             except Exception as e:
                 st.sidebar.error(f"Error membaca file: {e}")
 
     # --- CONTENT ---
-
-    # Gunakan active_df yang diambil dari DB atau Upload
     active_sess = st.session_state["project_sessions"].get(selected_project)
 
     if active_df is not None and not active_df.empty:
@@ -387,7 +352,6 @@ if check_password():
 
         tab1, tab2 = st.tabs(["📊 Live Preview", "📦 Bulk Download (Turbo)"])
 
-        # TAB 1
         with tab1:
             if not active_sess:
                 st.warning("⚠️ Masukkan PHPSESSID.")
@@ -396,7 +360,6 @@ if check_password():
                     lambda x: f"{x['SITE_NAME']} | {x['LOC_ID']}", axis=1
                 )
                 selected_option = st.selectbox("Pilih Lokasi:", select_options)
-
                 sel_idx = select_options[select_options == selected_option].index[0]
                 sel_row = active_df.iloc[sel_idx]
 
@@ -411,7 +374,6 @@ if check_password():
                                 s_date,
                                 e_date,
                             )
-
                         if df_res is not None and not df_res.empty:
                             m1, m2, m3, m4 = st.columns(4)
                             m1.metric(
@@ -423,37 +385,28 @@ if check_password():
                             )
                             m3.metric("Max User", f"{df_res['connected_user'].max()}")
                             m4.metric("Days", len(df_res))
-
-                            title_html = (
-                                f"<b>{sel_row['SITE_NAME']} ({sel_row['LOC_ID']})</b><br>"
-                                f"<span style='font-size: 16px; color: gray;'>{s_date.strftime('%d/%m/%Y')} - {e_date.strftime('%d/%m/%Y')}</span>"
-                            )
-
+                            title_html = f"<b>{sel_row['SITE_NAME']} ({sel_row['LOC_ID']})</b><br><span style='font-size: 16px; color: gray;'>{s_date.strftime('%d/%m/%Y')} - {e_date.strftime('%d/%m/%Y')}</span>"
+                            # UPDATE DI SINI: Ganti use_container_width -> width="stretch"
                             st.plotly_chart(
-                                create_chart(df_res, title_html),
-                                use_container_width=True,
+                                create_chart(df_res, title_html), width="stretch"
                             )
                         else:
                             st.error("Data kosong.")
 
-        # TAB 2
         with tab2:
             st.header(f"🚀 Turbo Download: {selected_project}")
-
             if len(d_range) == 2:
                 s_date, e_date = d_range
-
                 if st.button("Start Bulk Download"):
                     if not active_sess:
                         st.error("Session ID kosong!")
                         st.stop()
-
                     zip_buffer = io.BytesIO()
                     progress_text = st.empty()
                     my_bar = st.progress(0)
-
+                    # MENURUNKAN WORKER KE 5 AGAR SERVER GRATISAN TIDAK CRASH
                     with concurrent.futures.ThreadPoolExecutor(
-                        max_workers=10
+                        max_workers=5
                     ) as executor:
                         future_to_loc = {
                             executor.submit(
@@ -466,10 +419,8 @@ if check_password():
                             ): row
                             for index, row in active_df.iterrows()
                         }
-
                         completed_count = 0
                         total_items = len(active_df)
-
                         with zipfile.ZipFile(
                             zip_buffer, "a", zipfile.ZIP_DEFLATED, False
                         ) as zf:
@@ -482,7 +433,6 @@ if check_password():
                                 progress_text.text(
                                     f"Downloading {completed_count}/{total_items}..."
                                 )
-
                                 try:
                                     res = future.result()
                                     if res:
@@ -490,7 +440,6 @@ if check_password():
                                         zf.writestr(fname, img_data)
                                 except Exception:
                                     pass
-
                     progress_text.success("✅ Selesai!")
                     st.download_button(
                         "💾 Download ZIP",
@@ -499,6 +448,4 @@ if check_password():
                         "application/zip",
                     )
     else:
-        st.info(
-            "👈 Masukkan Session di sidebar. Jika data belum ada, menu Upload akan muncul otomatis."
-        )
+        st.info("👈 Masukkan Session di sidebar. Menu Upload akan muncul otomatis.")
