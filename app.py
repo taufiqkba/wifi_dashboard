@@ -1,5 +1,6 @@
 import concurrent.futures
 import io
+import sqlite3  # Database Library
 import zipfile
 from datetime import datetime
 
@@ -14,14 +15,77 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(
-    layout="wide", page_title="Wifi.id Usage Dashboard v3.1", page_icon="🚀"
+    layout="wide", page_title="Wifi.id Usage Dashboard v4", page_icon="💾"
 )
+
+# --- DATABASE SETUP (SQLITE) ---
+DB_NAME = "wifi_locations.db"
+
+
+def init_db():
+    """Membuat tabel database jika belum ada"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS locations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_name TEXT,
+            loc_id TEXT,
+            site_name TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def save_to_db(df, project_name):
+    """Menyimpan data dari Excel ke Database"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    # Hapus data lama project ini (replace)
+    c.execute("DELETE FROM locations WHERE project_name = ?", (project_name,))
+
+    # Insert data baru
+    data_tuples = [
+        (project_name, row["LOC_ID"], row["SITE_NAME"]) for _, row in df.iterrows()
+    ]
+    c.executemany(
+        "INSERT INTO locations (project_name, loc_id, site_name) VALUES (?, ?, ?)",
+        data_tuples,
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def load_from_db(project_name):
+    """Mengambil data dari Database"""
+    conn = sqlite3.connect(DB_NAME)
+    query = "SELECT loc_id, site_name FROM locations WHERE project_name = ?"
+    df = pd.read_sql_query(query, conn, params=(project_name,))
+    conn.close()
+
+    if not df.empty:
+        # Kembalikan nama kolom agar sesuai logika aplikasi
+        df.columns = ["LOC_ID", "SITE_NAME"]
+    return df
+
+
+def delete_project_data(project_name):
+    """Menghapus data proyek tertentu"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("DELETE FROM locations WHERE project_name = ?", (project_name,))
+    conn.commit()
+    conn.close()
+
+
+# Inisialisasi DB saat aplikasi jalan
+init_db()
 
 # --- INISIALISASI SESSION STATE ---
 if "project_sessions" not in st.session_state:
     st.session_state["project_sessions"] = {}
-if "project_data" not in st.session_state:
-    st.session_state["project_data"] = {}
 
 # --- CONFIG PROYEK ---
 PROJECT_CONFIG = {
@@ -107,73 +171,71 @@ def fetch_usage_data(session_id, vo_id, loc_id, start_date, end_date):
         return None
 
 
-# --- 2. FUNGSI CHART (MAJOR VISUAL UPDATE) ---
+# --- 2. FUNGSI CHART (UPDATED: LEBIH TEBAL) ---
 def create_chart(df, title_text):
     fig = go.Figure()
 
-    # Line 1: Connected User (Biru - Smooth Solid)
+    # Line 1: Connected User (Biru - Tebal 5)
     fig.add_trace(
         go.Scatter(
             x=df["date"],
             y=df["connected_user"],
             name="Connected User",
             mode="lines+markers",
-            line=dict(color="#2980b9", width=3, shape="spline"),  # Spline = Smooth
+            # UPDATE: width=5 agar tebal di Word
+            line=dict(color="#2980b9", width=5, shape="spline"),
+            marker=dict(size=8),  # Marker juga diperbesar sedikit
             yaxis="y",
         )
     )
 
-    # Line 2: Total Usage (Merah - Smooth Solid - NO DOTS)
+    # Line 2: Total Usage (Merah - Tebal 5 - Solid)
     fig.add_trace(
         go.Scatter(
             x=df["date"],
             y=df["total_usage_gb"],
             name="Total Usage (GB)",
             mode="lines+markers",
-            # Hapus dash='dot' agar garisnya solid penuh
-            line=dict(color="#c0392b", width=3, shape="spline"),
+            # UPDATE: width=5 agar tebal di Word
+            line=dict(color="#c0392b", width=5, shape="spline"),
+            marker=dict(size=8),
             yaxis="y2",
         )
     )
 
-    # --- LAYOUT ADJUSTMENT ---
     fig.update_layout(
         title=dict(
             text=title_text,
-            font=dict(size=22),
-            y=0.95,  # Posisi title agak ke atas
+            font=dict(size=22, color="black"),  # Pastikan hitam pekat
+            y=0.95,
             x=0.01,
             xanchor="left",
             yanchor="top",
         ),
-        # Atur Margin agar Title tidak menumpuk dengan Legend
-        # Top margin diperbesar (t=140)
         margin=dict(l=50, r=50, t=150, b=50),
-        # Legend ditaruh di atas plot area, tapi di bawah Title
         legend=dict(
             orientation="h",
             yanchor="bottom",
-            y=1.02,  # Sedikit di atas area grafik
+            y=1.02,
             xanchor="left",
             x=0,
+            font=dict(size=14),  # Legend font diperbesar
         ),
-        # X-Axis: Tampilkan SEMUA Tanggal
         xaxis=dict(
             showgrid=False,
-            tickmode="array",  # Mode manual
-            tickvals=df["date"],  # Gunakan semua tanggal dari data
-            tickformat="%d %b",  # Format: 01 Jan
-            tickangle=-45,  # Miringkan agar tidak tabrakan
+            tickmode="array",
+            tickvals=df["date"],
+            tickformat="%d %b",
+            tickangle=-45,
+            tickfont=dict(size=12),
         ),
-        # Y-Axis Kiri (User)
         yaxis=dict(
-            title=dict(text="Connected User", font=dict(color="#2980b9")),
-            tickfont=dict(color="#2980b9"),
+            title=dict(text="Connected User", font=dict(color="#2980b9", size=14)),
+            tickfont=dict(color="#2980b9", size=12),
         ),
-        # Y-Axis Kanan (Usage)
         yaxis2=dict(
-            title=dict(text="Total Usage (GB)", font=dict(color="#c0392b")),
-            tickfont=dict(color="#c0392b"),
+            title=dict(text="Total Usage (GB)", font=dict(color="#c0392b", size=14)),
+            tickfont=dict(color="#c0392b", size=12),
             overlaying="y",
             side="right",
             showgrid=False,
@@ -194,17 +256,12 @@ def process_single_location(row_data, phpsess, vo_id, s_date, e_date):
     if df is None or df.empty:
         return None
 
-    # Format Judul dengan <br><br> agar ada jarak enter
-    # Baris 1: Nama Lokasi & ID
-    # Baris 2: Tanggal (Ukuran font lebih kecil)
     title_html = (
         f"<b>{loc_name} ({loc_id})</b><br>"
         f"<span style='font-size: 16px; color: gray;'>{s_date.strftime('%d/%m/%Y')} - {e_date.strftime('%d/%m/%Y')}</span>"
     )
 
     fig = create_chart(df, title_html)
-
-    # Export High Res
     img_bytes = fig.to_image(format="png", width=1400, height=700, scale=2)
 
     clean_name = "".join([c if c.isalnum() else "_" for c in loc_name])
@@ -244,7 +301,7 @@ if check_password():
 
     st.sidebar.markdown("---")
 
-    # B. SESSION
+    # B. SESSION (Persistent Input)
     st.sidebar.subheader(f"🔑 Session ID: {selected_project}")
     default_val = st.session_state["project_sessions"].get(selected_project, "")
     new_sess = st.sidebar.text_input(
@@ -254,48 +311,70 @@ if check_password():
 
     st.sidebar.markdown("---")
 
-    # C. UPLOAD
-    st.sidebar.subheader(f"📤 Upload Data: {selected_project}")
-    uploaded_file = st.sidebar.file_uploader(
-        f"File Excel {selected_project}", type=["xlsx"], key=f"file_{selected_project}"
-    )
+    # C. DATA MANAGEMENT (DATABASE)
+    st.sidebar.subheader(f"💾 Database Lokasi")
 
-    if uploaded_file:
-        try:
-            df_temp = pd.read_excel(uploaded_file)
-            df_temp.columns = [
-                c.strip().upper().replace(" ", "_") for c in df_temp.columns
-            ]
+    # Cek apakah data sudah ada di DB?
+    active_df = load_from_db(selected_project)
 
-            col_loc_id = None
-            col_site_name = None
+    if not active_df.empty:
+        # DATA SUDAH ADA
+        st.sidebar.success(f"✅ {len(active_df)} Lokasi Tersimpan!")
+        st.sidebar.caption("Data dimuat dari Database.")
 
-            for col in df_temp.columns:
-                if "LOC" in col:
-                    col_loc_id = col
-                elif any(x in col for x in ["KEC", "NAM", "LOK", "GED", "SITE"]):
-                    col_site_name = col
+        # Opsi Hapus Data
+        with st.sidebar.expander("⚠️ Atur Ulang Data"):
+            if st.button(f"Hapus Data {selected_project}", type="primary"):
+                delete_project_data(selected_project)
+                st.rerun()  # Refresh halaman
+    else:
+        # DATA BELUM ADA - MUNCULKAN UPLOAD
+        st.sidebar.warning("Data lokasi belum ada. Upload Excel.")
+        uploaded_file = st.sidebar.file_uploader(
+            f"Upload Excel {selected_project}",
+            type=["xlsx"],
+            key=f"file_{selected_project}",
+        )
 
-            if not col_site_name and len(df_temp.columns) > 1:
-                col_site_name = (
-                    df_temp.columns[1]
-                    if df_temp.columns[0] == col_loc_id
-                    else df_temp.columns[0]
-                )
+        if uploaded_file:
+            try:
+                df_temp = pd.read_excel(uploaded_file)
+                df_temp.columns = [
+                    c.strip().upper().replace(" ", "_") for c in df_temp.columns
+                ]
 
-            if col_loc_id and col_site_name:
-                df_clean = df_temp[[col_loc_id, col_site_name]].copy()
-                df_clean.columns = ["LOC_ID", "SITE_NAME"]
-                st.session_state["project_data"][selected_project] = df_clean
-                st.sidebar.success(f"✅ {len(df_clean)} Lokasi dimuat!")
-            else:
-                st.sidebar.error("❌ Gagal mendeteksi kolom LOC ID atau Nama.")
+                col_loc_id = None
+                col_site_name = None
 
-        except Exception as e:
-            st.sidebar.error(f"Error membaca file: {e}")
+                for col in df_temp.columns:
+                    if "LOC" in col:
+                        col_loc_id = col
+                    elif any(x in col for x in ["KEC", "NAM", "LOK", "GED", "SITE"]):
+                        col_site_name = col
+
+                if not col_site_name and len(df_temp.columns) > 1:
+                    col_site_name = (
+                        df_temp.columns[1]
+                        if df_temp.columns[0] == col_loc_id
+                        else df_temp.columns[0]
+                    )
+
+                if col_loc_id and col_site_name:
+                    df_clean = df_temp[[col_loc_id, col_site_name]].copy()
+                    df_clean.columns = ["LOC_ID", "SITE_NAME"]
+
+                    # SIMPAN KE DB
+                    save_to_db(df_clean, selected_project)
+                    st.sidebar.success("Disimpan ke Database!")
+                    st.rerun()  # Refresh agar langsung masuk mode "Data Tersimpan"
+                else:
+                    st.sidebar.error("❌ Gagal mendeteksi kolom LOC ID atau Nama.")
+            except Exception as e:
+                st.sidebar.error(f"Error membaca file: {e}")
 
     # --- CONTENT ---
-    active_df = st.session_state["project_data"].get(selected_project)
+
+    # Gunakan active_df yang diambil dari DB atau Upload
     active_sess = st.session_state["project_sessions"].get(selected_project)
 
     if active_df is not None and not active_df.empty:
@@ -345,7 +424,6 @@ if check_password():
                             m3.metric("Max User", f"{df_res['connected_user'].max()}")
                             m4.metric("Days", len(df_res))
 
-                            # TITLE CANTIK DENGAN SPACING
                             title_html = (
                                 f"<b>{sel_row['SITE_NAME']} ({sel_row['LOC_ID']})</b><br>"
                                 f"<span style='font-size: 16px; color: gray;'>{s_date.strftime('%d/%m/%Y')} - {e_date.strftime('%d/%m/%Y')}</span>"
@@ -421,4 +499,6 @@ if check_password():
                         "application/zip",
                     )
     else:
-        st.info("👈 Masukkan Session & Upload Excel dulu.")
+        st.info(
+            "👈 Masukkan Session di sidebar. Jika data belum ada, menu Upload akan muncul otomatis."
+        )
