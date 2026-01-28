@@ -15,7 +15,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(
-    layout="wide", page_title="Wifi.id Usage Dashboard v5", page_icon="🔐"
+    layout="wide", page_title="Wifi.id Usage Dashboard v5.1", page_icon="🔐"
 )
 
 # --- DATABASE SETUP (SQLITE) ---
@@ -85,14 +85,13 @@ PROJECT_CONFIG = {
     "Lainnya": {"vo_id": "15557"},
 }
 
-# --- CREDENTIALS (USERNAME & PASSWORD) ---
-# Format: "username": "password"
+# --- CREDENTIALS ---
 USERS = {"admin": "admin123", "team_jateng": "jateng2026", "user_lapangan": "lapangan1"}
 
 
 # --- 1. FUNGSI FETCH DATA ---
 def fetch_usage_data(session_id, vo_id, loc_id, start_date, end_date):
-    url = "https://venue.wifi.id/vdash/dashboard/plinechart"
+    url = "https://venue.wifi.id/vdash/dashboard/plinechart?"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Cookie": f"PHPSESSID={session_id}",
@@ -144,6 +143,8 @@ def fetch_usage_data(session_id, vo_id, loc_id, start_date, end_date):
                 )
             else:
                 df["connected_user"] = 0
+
+            # PENTING: Sort berdasarkan tanggal asli dulu sebelum diubah jadi string
             df = df.sort_values("date")
             return df[["date", "connected_user", "total_usage_gb"]]
         else:
@@ -152,12 +153,17 @@ def fetch_usage_data(session_id, vo_id, loc_id, start_date, end_date):
         return None
 
 
-# --- 2. FUNGSI CHART ---
+# --- 2. FUNGSI CHART (UPDATED: CATEGORY AXIS) ---
 def create_chart(df, title_text):
+    # Buat kolom baru format String agar dibaca sebagai KATEGORI (Label), bukan Time Series
+    df["date_str"] = df["date"].dt.strftime("%d %b")  # Contoh: "12 Jan"
+
     fig = go.Figure()
+
+    # Gunakan x=df['date_str'] bukan df['date']
     fig.add_trace(
         go.Scatter(
-            x=df["date"],
+            x=df["date_str"],
             y=df["connected_user"],
             name="Connected User",
             mode="lines+markers",
@@ -166,9 +172,10 @@ def create_chart(df, title_text):
             yaxis="y",
         )
     )
+
     fig.add_trace(
         go.Scatter(
-            x=df["date"],
+            x=df["date_str"],
             y=df["total_usage_gb"],
             name="Total Usage (GB)",
             mode="lines+markers",
@@ -177,6 +184,7 @@ def create_chart(df, title_text):
             yaxis="y2",
         )
     )
+
     fig.update_layout(
         title=dict(
             text=title_text,
@@ -195,14 +203,15 @@ def create_chart(df, title_text):
             x=0,
             font=dict(size=14),
         ),
+        # --- UPDATE UTAMA DI SINI ---
         xaxis=dict(
+            type="category",  # INI KUNCINYA: Memaksa sumbu X jadi Kategori (seperti A, B, C)
             showgrid=False,
-            tickmode="array",
-            tickvals=df["date"],
-            tickformat="%d %b",
             tickangle=-45,
             tickfont=dict(size=12),
+            # Kita hapus tickvals karena type='category' otomatis menampilkan semua data yang ada
         ),
+        # ----------------------------
         yaxis=dict(
             title=dict(text="Connected User", font=dict(color="#2980b9", size=14)),
             tickfont=dict(color="#2980b9", size=12),
@@ -227,23 +236,23 @@ def process_single_location(row_data, phpsess, vo_id, s_date, e_date):
     df = fetch_usage_data(phpsess, vo_id, loc_id, s_date, e_date)
     if df is None or df.empty:
         return None
+
     title_html = f"<b>{loc_name} ({loc_id})</b><br><span style='font-size: 16px; color: gray;'>{s_date.strftime('%d/%m/%Y')} - {e_date.strftime('%d/%m/%Y')}</span>"
     fig = create_chart(df, title_html)
     img_bytes = fig.to_image(format="png", width=1400, height=700, scale=2)
+
     clean_name = "".join([c if c.isalnum() else "_" for c in loc_name])
     filename = f"{clean_name}_{loc_id}.png"
     return (filename, img_bytes)
 
 
-# --- 4. SECURITY (LOGIN USERNAME & PASSWORD) ---
+# --- 4. SECURITY ---
 def login_page():
     st.header("🔐 Login Dashboard")
-
     with st.form("login_form"):
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
         submit = st.form_submit_button("Login")
-
         if submit:
             if username in USERS and USERS[username] == password:
                 st.session_state["authenticated"] = True
@@ -257,7 +266,6 @@ def login_page():
 def check_authentication():
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
-
     if not st.session_state["authenticated"]:
         login_page()
         return False
@@ -266,7 +274,6 @@ def check_authentication():
 
 # --- MAIN APP ---
 if check_authentication():
-    # LOGOUT BUTTON DI SIDEBAR
     with st.sidebar:
         st.write(f"👤 Login sebagai: **{st.session_state['user']}**")
         if st.button("Logout"):
@@ -274,14 +281,12 @@ if check_authentication():
             st.rerun()
         st.title("🎛️ Control Panel")
 
-    # A. PROYEK
     selected_project = st.sidebar.selectbox(
         "📂 Pilih Proyek Aktif", list(PROJECT_CONFIG.keys())
     )
     current_vo_id = PROJECT_CONFIG[selected_project]["vo_id"]
     st.sidebar.markdown("---")
 
-    # B. SESSION
     st.sidebar.subheader(f"🔑 Session ID: {selected_project}")
     default_val = st.session_state["project_sessions"].get(selected_project, "")
     new_sess = st.sidebar.text_input(
@@ -290,7 +295,6 @@ if check_authentication():
     st.session_state["project_sessions"][selected_project] = new_sess
     st.sidebar.markdown("---")
 
-    # C. DATABASE
     st.sidebar.subheader(f"💾 Database Lokasi")
     active_df = load_from_db(selected_project)
 
@@ -339,7 +343,6 @@ if check_authentication():
             except Exception as e:
                 st.sidebar.error(f"Error membaca file: {e}")
 
-    # --- CONTENT ---
     active_sess = st.session_state["project_sessions"].get(selected_project)
 
     if active_df is not None and not active_df.empty:
@@ -386,7 +389,6 @@ if check_authentication():
                             m3.metric("Max User", f"{df_res['connected_user'].max()}")
                             m4.metric("Days", len(df_res))
                             title_html = f"<b>{sel_row['SITE_NAME']} ({sel_row['LOC_ID']})</b><br><span style='font-size: 16px; color: gray;'>{s_date.strftime('%d/%m/%Y')} - {e_date.strftime('%d/%m/%Y')}</span>"
-                            # UPDATE DI SINI: Ganti use_container_width -> width="stretch"
                             st.plotly_chart(
                                 create_chart(df_res, title_html), width="stretch"
                             )
@@ -404,7 +406,6 @@ if check_authentication():
                     zip_buffer = io.BytesIO()
                     progress_text = st.empty()
                     my_bar = st.progress(0)
-                    # MENURUNKAN WORKER KE 5 AGAR SERVER GRATISAN TIDAK CRASH
                     with concurrent.futures.ThreadPoolExecutor(
                         max_workers=5
                     ) as executor:
