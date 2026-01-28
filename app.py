@@ -1,11 +1,12 @@
 import concurrent.futures
 import io
 import sqlite3
-import time  # Untuk jeda retry
+import time
 import zipfile
 from datetime import datetime
 
 import pandas as pd
+import plotly.express as px  # Tambahan untuk Bar Chart Summary
 import plotly.graph_objects as go
 import requests
 import streamlit as st
@@ -16,10 +17,10 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(
-    layout="wide", page_title="Wifi.id Usage Dashboard v6.0", page_icon="💎"
+    layout="wide", page_title="Wifi.id Usage Dashboard v7.0", page_icon="🏆"
 )
 
-# --- DATABASE SETUP (SQLITE) ---
+# --- DATABASE SETUP ---
 DB_NAME = "wifi_locations.db"
 
 
@@ -82,15 +83,16 @@ PROJECT_CONFIG = {
     "Kecamatan Berdaya": {"vo_id": "15557"},
     "Pendidikan": {"vo_id": "13231"},
     "Pelayanan Publik": {"vo_id": "12945"},
-    "POLDA Jawa Tengah 1": {"vo_id": "13329"},
+    "WMS POLDA Jawa Tengah": {"vo_id": "13329"},
     "Lainnya": {"vo_id": "15557"},
 }
 
 # --- CREDENTIALS ---
+# Best Practice: Sebaiknya gunakan st.secrets di production
 USERS = {"admin": "admin123", "team_jateng": "jateng2026", "user_lapangan": "lapangan1"}
 
 
-# --- 1. FUNGSI FETCH DATA (DENGAN RETRY LOGIC) ---
+# --- 1. FUNGSI FETCH DATA ---
 def fetch_usage_data(session_id, vo_id, loc_id, start_date, end_date, max_retries=3):
     url = "https://venue.wifi.id/vdash/dashboard/plinechart?"
     headers = {
@@ -116,15 +118,14 @@ def fetch_usage_data(session_id, vo_id, loc_id, start_date, end_date, max_retrie
         "sitename": "",
     }
 
-    # RETRY LOOP
     for attempt in range(max_retries):
         try:
             response = requests.post(
                 url, headers=headers, data=payload, verify=False, timeout=30
             )
             if response.status_code != 200:
-                time.sleep(1)  # Jeda dulu sebelum retry
-                continue  # Coba lagi
+                time.sleep(1)
+                continue
 
             try:
                 data = response.json()
@@ -161,18 +162,16 @@ def fetch_usage_data(session_id, vo_id, loc_id, start_date, end_date, max_retrie
                 return pd.DataFrame()
 
         except Exception:
-            time.sleep(1)  # Jeda jika koneksi error
-            continue  # Coba lagi
+            time.sleep(1)
+            continue
 
-    return None  # Nyerah setelah 3x percobaan
+    return None
 
 
-# --- 2. FUNGSI CHART (CATEGORY AXIS) ---
+# --- 2. FUNGSI CHART ---
 def create_chart(df, title_text):
     df["date_str"] = df["date"].dt.strftime("%d %b")
-
     fig = go.Figure()
-
     fig.add_trace(
         go.Scatter(
             x=df["date_str"],
@@ -184,7 +183,6 @@ def create_chart(df, title_text):
             yaxis="y",
         )
     )
-
     fig.add_trace(
         go.Scatter(
             x=df["date_str"],
@@ -196,7 +194,6 @@ def create_chart(df, title_text):
             yaxis="y2",
         )
     )
-
     fig.update_layout(
         title=dict(
             text=title_text,
@@ -235,55 +232,69 @@ def create_chart(df, title_text):
     return fig
 
 
-# --- 3. HELPER: BULK PROCESSOR ---
+# --- 3. HELPER: BULK PROCESSOR & SUMMARY ---
 def process_single_location(row_data, phpsess, vo_id, s_date, e_date):
     loc_id = row_data["LOC_ID"]
     loc_name = row_data["SITE_NAME"]
 
-    # Fungsi fetch sudah punya auto-retry didalamnya
     df = fetch_usage_data(phpsess, vo_id, loc_id, s_date, e_date)
 
-    if df is None or df.empty:
-        return None
+    # CASE ERROR: Jika data None (Gagal Fetch)
+    if df is None:
+        return {
+            "status": "error",
+            "name": loc_name,
+            "id": loc_id,
+            "reason": "Connection Failed",
+        }
 
+    # CASE EMPTY: Jika data Kosong (Zonk)
+    if df.empty:
+        return {
+            "status": "empty",
+            "name": loc_name,
+            "id": loc_id,
+            "reason": "No Data Available",
+        }
+
+    # SUKSES FETCH
+    total_usage = df["total_usage_gb"].sum()
+
+    # Buat Chart
     title_html = f"<b>{loc_name} ({loc_id})</b><br><span style='font-size: 16px; color: gray;'>{s_date.strftime('%d/%m/%Y')} - {e_date.strftime('%d/%m/%Y')}</span>"
-
-    # Generate Chart
     fig = create_chart(df, title_html)
-
-    # Render Image (Bagian Paling Berat di CPU)
     img_bytes = fig.to_image(format="png", width=1400, height=700, scale=2)
-
-    # MEMORY CLEANUP: Hapus object figure setelah jadi bytes
     del fig
 
     clean_name = "".join([c if c.isalnum() else "_" for c in loc_name])
     filename = f"{clean_name}_{loc_id}.png"
-    return (filename, img_bytes)
+
+    return {
+        "status": "success",
+        "filename": filename,
+        "img_data": img_bytes,
+        "loc_id": loc_id,
+        "site_name": loc_name,
+        "total_usage": total_usage,
+    }
 
 
 # --- 4. SECURITY ---
-def login_page():
-    st.header("🔐 Login Dashboard")
-    with st.form("login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        submit = st.form_submit_button("Login")
-        if submit:
-            if username in USERS and USERS[username] == password:
-                st.session_state["authenticated"] = True
-                st.session_state["user"] = username
-                st.success("Login berhasil!")
-                st.rerun()
-            else:
-                st.error("Username atau Password salah.")
-
-
 def check_authentication():
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
     if not st.session_state["authenticated"]:
-        login_page()
+        st.header("🔐 Login Dashboard")
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            if st.form_submit_button("Login"):
+                if username in USERS and USERS[username] == password:
+                    st.session_state["authenticated"] = True
+                    st.session_state["user"] = username
+                    st.rerun()
+                else:
+                    st.error("Login Gagal")
         return False
     return True
 
@@ -291,41 +302,37 @@ def check_authentication():
 # --- MAIN APP ---
 if check_authentication():
     with st.sidebar:
-        st.write(f"👤 Login sebagai: **{st.session_state['user']}**")
+        st.write(f"👤 User: **{st.session_state['user']}**")
         if st.button("Logout"):
             st.session_state["authenticated"] = False
             st.rerun()
         st.title("🎛️ Control Panel")
 
-    selected_project = st.sidebar.selectbox(
-        "📂 Pilih Proyek Aktif", list(PROJECT_CONFIG.keys())
-    )
+    selected_project = st.sidebar.selectbox("📂 Proyek", list(PROJECT_CONFIG.keys()))
     current_vo_id = PROJECT_CONFIG[selected_project]["vo_id"]
-    st.sidebar.markdown("---")
 
-    st.sidebar.subheader(f"🔑 Session ID: {selected_project}")
+    # Session Input
     default_val = st.session_state["project_sessions"].get(selected_project, "")
     new_sess = st.sidebar.text_input(
-        "PHPSESSID", value=default_val, type="password", key=f"sess_{selected_project}"
+        f"Session ID ({selected_project})", value=default_val, type="password"
     )
     st.session_state["project_sessions"][selected_project] = new_sess
-    st.sidebar.markdown("---")
 
-    st.sidebar.subheader(f"💾 Database Lokasi")
+    # Database Logic
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("💾 Database")
     active_df = load_from_db(selected_project)
 
     if not active_df.empty:
-        st.sidebar.success(f"✅ {len(active_df)} Lokasi Tersimpan!")
-        with st.sidebar.expander("⚠️ Atur Ulang Data"):
-            if st.button(f"Hapus Data {selected_project}", type="primary"):
+        st.sidebar.success(f"✅ {len(active_df)} Lokasi Ready")
+        with st.sidebar.expander("⚠️ Atur Data"):
+            if st.button(f"Hapus DB {selected_project}", type="primary"):
                 delete_project_data(selected_project)
                 st.rerun()
     else:
-        st.sidebar.warning("Data lokasi belum ada. Upload Excel.")
+        st.sidebar.warning("Data kosong. Upload Excel.")
         uploaded_file = st.sidebar.file_uploader(
-            f"Upload Excel {selected_project}",
-            type=["xlsx"],
-            key=f"file_{selected_project}",
+            f"Upload {selected_project}", type=["xlsx"], key=f"file_{selected_project}"
         )
         if uploaded_file:
             try:
@@ -352,40 +359,50 @@ if check_authentication():
                     df_clean = df_temp[[col_loc_id, col_site_name]].copy()
                     df_clean.columns = ["LOC_ID", "SITE_NAME"]
                     save_to_db(df_clean, selected_project)
-                    st.sidebar.success("Disimpan ke Database!")
+                    st.sidebar.success("Disimpan!")
                     st.rerun()
                 else:
-                    st.sidebar.error("❌ Gagal mendeteksi kolom LOC ID atau Nama.")
+                    st.sidebar.error("Format Excel salah.")
             except Exception as e:
-                st.sidebar.error(f"Error membaca file: {e}")
+                st.sidebar.error(f"Error: {e}")
 
+    # --- CONTENT AREA ---
     active_sess = st.session_state["project_sessions"].get(selected_project)
 
     if active_df is not None and not active_df.empty:
-        col_d1, col_d2 = st.columns([1, 3])
-        with col_d1:
-            st.markdown(f"**Periode Laporan**")
-            d_range = st.date_input(
-                "Rentang Tanggal", value=(datetime(2026, 1, 1), datetime(2026, 1, 31))
-            )
+        st.markdown(f"### 📊 Dashboard: {selected_project}")
+        d_range = st.date_input(
+            "Periode Laporan", value=(datetime(2026, 1, 1), datetime(2026, 1, 31))
+        )
 
-        tab1, tab2 = st.tabs(["📊 Live Preview", "📦 Bulk Download (Stabil)"])
+        # TAB MENU
+        tab1, tab2, tab3 = st.tabs(
+            [
+                "🔍 Cek Single Location",
+                "📥 Bulk Download (Manager)",
+                "📈 Global Summary (Rekap)",
+            ]
+        )
 
+        # === TAB 1: SINGLE CHECK ===
         with tab1:
             if not active_sess:
-                st.warning("⚠️ Masukkan PHPSESSID.")
+                st.warning("⚠️ Masukkan Session ID di Sidebar.")
             else:
-                select_options = active_df.apply(
-                    lambda x: f"{x['SITE_NAME']} | {x['LOC_ID']}", axis=1
-                )
-                selected_option = st.selectbox("Pilih Lokasi:", select_options)
+                col_sel1, col_sel2 = st.columns([3, 1])
+                with col_sel1:
+                    select_options = active_df.apply(
+                        lambda x: f"{x['SITE_NAME']} | {x['LOC_ID']}", axis=1
+                    )
+                    selected_option = st.selectbox("Pilih Lokasi:", select_options)
+
                 sel_idx = select_options[select_options == selected_option].index[0]
                 sel_row = active_df.iloc[sel_idx]
 
                 if len(d_range) == 2:
                     s_date, e_date = d_range
-                    if st.button("🔍 Cek Chart"):
-                        with st.spinner(f"Fetching..."):
+                    if st.button("Tampilkan Grafik", key="btn_single"):
+                        with st.spinner("Fetching data..."):
                             df_res = fetch_usage_data(
                                 active_sess,
                                 current_vo_id,
@@ -393,6 +410,7 @@ if check_authentication():
                                 s_date,
                                 e_date,
                             )
+
                         if df_res is not None and not df_res.empty:
                             m1, m2, m3, m4 = st.columns(4)
                             m1.metric(
@@ -400,91 +418,191 @@ if check_authentication():
                                 f"{df_res['total_usage_gb'].sum():.2f} GB",
                             )
                             m2.metric(
-                                "Avg Usage", f"{df_res['total_usage_gb'].mean():.2f} GB"
+                                "Rata-rata/Hari",
+                                f"{df_res['total_usage_gb'].mean():.2f} GB",
                             )
                             m3.metric("Max User", f"{df_res['connected_user'].max()}")
-                            m4.metric("Days", len(df_res))
+                            m4.metric("Data Point", f"{len(df_res)} Hari")
+
                             title_html = f"<b>{sel_row['SITE_NAME']} ({sel_row['LOC_ID']})</b><br><span style='font-size: 16px; color: gray;'>{s_date.strftime('%d/%m/%Y')} - {e_date.strftime('%d/%m/%Y')}</span>"
                             st.plotly_chart(
                                 create_chart(df_res, title_html), width="stretch"
                             )
                         else:
-                            st.error("Data kosong.")
+                            st.error("Data kosong atau session invalid.")
 
+        # === TAB 2: BULK DOWNLOAD + ERROR LOGGING ===
         with tab2:
-            st.header(f"🚀 Download Manager: {selected_project}")
-
-            # FITUR BARU: PILIHAN KECEPATAN
             st.info(
-                "💡 **Tips:** Pilih 'Safe Mode' jika koneksi tidak stabil atau server spesifikasi rendah."
-            )
-            speed_mode = st.radio(
-                "Pilih Mode Download:",
-                (
-                    "Safe Mode (Stabil, 3 Concurrent)",
-                    "Turbo Mode (Cepat, 8 Concurrent)",
-                ),
-                index=0,
+                "Fitur ini akan mendownload semua chart dan membuat **Laporan Error** jika ada data yang gagal."
             )
 
-            # Tentukan max_workers berdasarkan pilihan
-            workers = 3 if "Safe" in speed_mode else 8
+            mode = st.radio(
+                "Kecepatan Download:",
+                ["Safe Mode (Stabil)", "Turbo Mode (Cepat)"],
+                horizontal=True,
+            )
+            workers = 3 if "Safe" in mode else 8
 
-            if len(d_range) == 2:
+            if len(d_range) == 2 and st.button(
+                f"Mulai Download ({len(active_df)} Lokasi)", key="btn_bulk"
+            ):
+                if not active_sess:
+                    st.error("Session ID Kosong!")
+                    st.stop()
+
                 s_date, e_date = d_range
-                if st.button(f"Mulai Download ({len(active_df)} Lokasi)"):
-                    if not active_sess:
-                        st.error("Session ID kosong!")
-                        st.stop()
+                zip_buffer = io.BytesIO()
+                prog_bar = st.progress(0)
+                status_text = st.empty()
 
-                    zip_buffer = io.BytesIO()
-                    progress_text = st.empty()
-                    my_bar = st.progress(0)
+                # List untuk menampung error log
+                error_logs = []
+                success_count = 0
 
-                    # LOGIC UTAMA: CONCURRENT DOWNLOAD
-                    with concurrent.futures.ThreadPoolExecutor(
-                        max_workers=workers
-                    ) as executor:
-                        future_to_loc = {
-                            executor.submit(
-                                process_single_location,
-                                row,
-                                active_sess,
-                                current_vo_id,
-                                s_date,
-                                e_date,
-                            ): row
-                            for index, row in active_df.iterrows()
-                        }
-                        completed_count = 0
-                        total_items = len(active_df)
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=workers
+                ) as executor:
+                    futures = {
+                        executor.submit(
+                            process_single_location,
+                            row,
+                            active_sess,
+                            current_vo_id,
+                            s_date,
+                            e_date,
+                        ): row
+                        for _, row in active_df.iterrows()
+                    }
 
-                        with zipfile.ZipFile(
-                            zip_buffer, "a", zipfile.ZIP_DEFLATED, False
-                        ) as zf:
-                            for future in concurrent.futures.as_completed(
-                                future_to_loc
-                            ):
-                                completed_count += 1
-                                pct = completed_count / total_items
-                                my_bar.progress(pct)
-                                progress_text.text(
-                                    f"Processing {completed_count}/{total_items}..."
+                    total = len(active_df)
+                    with zipfile.ZipFile(
+                        zip_buffer, "a", zipfile.ZIP_DEFLATED, False
+                    ) as zf:
+                        for i, future in enumerate(
+                            concurrent.futures.as_completed(futures)
+                        ):
+                            res = future.result()
+                            prog_bar.progress((i + 1) / total)
+                            status_text.text(f"Processing {i + 1}/{total}...")
+
+                            if res["status"] == "success":
+                                zf.writestr(res["filename"], res["img_data"])
+                                success_count += 1
+                            else:
+                                # Catat Error
+                                error_logs.append(
+                                    f"[{res['status'].upper()}] {res['name']} ({res['id']}): {res['reason']}"
                                 )
-                                try:
-                                    res = future.result()
-                                    if res:
-                                        fname, img_data = res
-                                        zf.writestr(fname, img_data)
-                                except Exception:
-                                    pass
 
-                    progress_text.success("✅ Download Selesai!")
-                    st.download_button(
-                        "💾 Simpan ZIP File",
-                        zip_buffer.getvalue(),
-                        f"Chart_{selected_project}.zip",
-                        "application/zip",
+                        # Tulis File Log Error ke dalam ZIP
+                        if error_logs:
+                            log_content = (
+                                f"LAPORAN ERROR DOWNLOAD\nProject: {selected_project}\nTanggal: {datetime.now()}\n\n"
+                                + "\n".join(error_logs)
+                            )
+                            zf.writestr("00_LAPORAN_ERROR_LOG.txt", log_content)
+
+                status_text.success(
+                    f"✅ Selesai! Berhasil: {success_count}, Gagal/Kosong: {len(error_logs)}"
+                )
+                if error_logs:
+                    st.warning(
+                        f"⚠️ Ada {len(error_logs)} lokasi yang gagal/kosong. Cek file '00_LAPORAN_ERROR_LOG.txt' di dalam ZIP."
                     )
-    else:
-        st.info("👈 Masukkan Session di sidebar. Menu Upload akan muncul otomatis.")
+
+                st.download_button(
+                    "💾 Download ZIP Hasil",
+                    zip_buffer.getvalue(),
+                    f"Report_{selected_project}.zip",
+                    "application/zip",
+                )
+
+        # === TAB 3: GLOBAL SUMMARY (NEW FEATURE!) ===
+        with tab3:
+            st.markdown("### 📈 Rekapitulasi Data (Top Usage)")
+            st.caption(
+                "Fitur ini akan menarik data sekilas dari seluruh lokasi untuk membuat peringkat penggunaan."
+            )
+
+            if st.button("Generate Summary Report"):
+                if not active_sess:
+                    st.error("Session ID Kosong!")
+                    st.stop()
+
+                s_date, e_date = d_range
+                summary_data = []
+                prog_bar = st.progress(0)
+
+                # Gunakan Turbo Mode untuk fetch data (Tanpa generate gambar biar cepat)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                    futures = {
+                        executor.submit(
+                            fetch_usage_data,
+                            active_sess,
+                            current_vo_id,
+                            row["LOC_ID"],
+                            s_date,
+                            e_date,
+                        ): row
+                        for _, row in active_df.iterrows()
+                    }
+
+                    for i, future in enumerate(
+                        concurrent.futures.as_completed(futures)
+                    ):
+                        row = futures[future]
+                        df_res = future.result()
+                        prog_bar.progress((i + 1) / len(active_df))
+
+                        if df_res is not None and not df_res.empty:
+                            total_gb = df_res["total_usage_gb"].sum()
+                            avg_gb = df_res["total_usage_gb"].mean()
+                            summary_data.append(
+                                {
+                                    "Kecamatan/Lokasi": row["SITE_NAME"],
+                                    "LOC ID": row["LOC_ID"],
+                                    "Total Usage (GB)": round(total_gb, 2),
+                                    "Rata-rata (GB)": round(avg_gb, 2),
+                                }
+                            )
+
+                if summary_data:
+                    df_summary = pd.DataFrame(summary_data).sort_values(
+                        "Total Usage (GB)", ascending=False
+                    )
+
+                    # Tampilkan Metric Global
+                    col1, col2 = st.columns(2)
+                    col1.metric(
+                        "Total Usage Project",
+                        f"{df_summary['Total Usage (GB)'].sum():,.2f} GB",
+                    )
+                    col2.metric(
+                        "Lokasi Aktif", f"{len(df_summary)} / {len(active_df)} Titik"
+                    )
+
+                    st.markdown("---")
+
+                    # Tampilkan Bar Chart Top 10
+                    st.subheader("🏆 Top 10 Lokasi dengan Usage Tertinggi")
+                    df_top10 = df_summary.head(10)
+                    fig_bar = px.bar(
+                        df_top10,
+                        x="Total Usage (GB)",
+                        y="Kecamatan/Lokasi",
+                        orientation="h",
+                        text="Total Usage (GB)",
+                        color="Total Usage (GB)",
+                        color_continuous_scale="Blues",
+                    )
+                    fig_bar.update_layout(
+                        yaxis=dict(autorange="reversed")
+                    )  # Urutan 1 di atas
+                    st.plotly_chart(fig_bar, use_container_width=True)
+
+                    # Tampilkan Data Table
+                    st.subheader("📋 Data Lengkap")
+                    st.dataframe(df_summary, use_container_width=True)
+                else:
+                    st.error("Gagal mengambil data rekap. Pastikan Session ID Valid.")
