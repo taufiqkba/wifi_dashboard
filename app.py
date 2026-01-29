@@ -11,8 +11,6 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 import urllib3
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 # --- MATIKAN WARNING SSL ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -101,6 +99,87 @@ except FileNotFoundError:
 
 
 # --- 1. FUNGSI FETCH DATA ---
+# def fetch_usage_data(session_id, vo_id, loc_id, start_date, end_date, max_retries=3):
+#     url = "https://venue.wifi.id/vdash/dashboard/plinechart?"
+#     headers = {
+#         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+#         "Cookie": f"PHPSESSID={session_id}",
+#         "X-Requested-With": "XMLHttpRequest",
+#         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+#     }
+#     s_date_clean = start_date.strftime("%Y%m%d")
+#     e_date_clean = end_date.strftime("%Y%m%d")
+#     payload = {
+#         "optionsRadios": "3",
+#         "startdate": s_date_clean,
+#         "enddate": e_date_clean,
+#         "rr": "3",
+#         "vo": vo_id,
+#         "level": "l2",
+#         "locid": loc_id,
+#         "namasite": "JATENG",
+#         "ap": "",
+#         "kota": "",
+#         "ssid": "",
+#         "sitename": "",
+#     }
+
+#     for attempt in range(max_retries):
+#         try:
+#             response = requests.post(
+#                 url, headers=headers, data=payload, verify=False, timeout=30
+#             )
+#             if response.status_code != 200:
+#                 time.sleep(1)
+#                 continue
+
+#             try:
+#                 data = response.json()
+#             except ValueError:
+#                 return None
+
+#             if not data:
+#                 return pd.DataFrame()
+
+#             df = pd.DataFrame(data)
+#             if "PERIODE" in df.columns:
+#                 df["date"] = pd.to_datetime(
+#                     df["PERIODE"], format="%Y%m%d", errors="coerce"
+#                 )
+#                 if "USAGES" in df.columns:
+#                     df["usage_bytes"] = pd.to_numeric(
+#                         df["USAGES"], errors="coerce"
+#                     ).fillna(0)
+#                     df["total_usage_gb"] = df["usage_bytes"] / (1024**3)
+#                 else:
+#                     df["total_usage_gb"] = 0
+#                 if "TRAFIK" in df.columns:
+#                     df["connected_user"] = (
+#                         pd.to_numeric(df["TRAFIK"], errors="coerce")
+#                         .fillna(0)
+#                         .astype(int)
+#                     )
+#                 else:
+#                     df["connected_user"] = 0
+
+#                 df = df.sort_values("date")
+#                 return df[["date", "connected_user", "total_usage_gb"]]
+#             else:
+#                 return pd.DataFrame()
+
+#         except Exception:
+#             time.sleep(1)
+#             continue
+
+#     return None
+
+# --- IMPORTS ---
+# Pastikan ada import ini di atas
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+
 # --- SETUP SESSION GLOBAL (Supaya koneksi tidak putus-nyambung) ---
 def get_session():
     if "request_session" not in st.session_state:

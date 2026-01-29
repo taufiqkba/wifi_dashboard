@@ -1,0 +1,13 @@
+version: "3"
+services:
+  wifi-dashboard:
+    build: .
+    container_name: wifi_dash_v7
+    restart: always
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./wifi_locations.db:/app/wifi_locations.db # Biar database gak hilang kalau restart
+      - ./.streamlit/secrets.toml:/app/.streamlit/secrets.toml # Mapping secrets
+    environment:
+      - TZ=Asia/Jakarta # Set waktu ke WIB
