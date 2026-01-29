@@ -1,2 +1,25 @@
+# --- SYSTEM & MAC ---
+.DS_Store
+
+# --- PYTHON ---
+__pycache__/
+*.pyc
+venv/
+
+# --- STREAMLIT SECRETS (WAJIB!) ---
+# Folder .streamlit boleh diupload, TAPI file secrets.toml JANGAN
 .streamlit/secrets.toml
-.env
+
+# --- DATABASE & LOCAL DATA ---
+# Database lokal tidak perlu diupload, nanti di server buat baru/upload excel lagi
+*.db
+wifi_locations.db
+
+# --- DRIVER & BINARIES (YANG BESAR ITU) ---
+chromedriver
+geckodriver
+
+# --- TEMP & LOGS ---
+temp/
+debug_captcha.png
+note.txt
