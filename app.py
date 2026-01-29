@@ -11,6 +11,8 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 import urllib3
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # --- MATIKAN WARNING SSL ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -99,16 +101,38 @@ except FileNotFoundError:
 
 
 # --- 1. FUNGSI FETCH DATA ---
-def fetch_usage_data(session_id, vo_id, loc_id, start_date, end_date, max_retries=3):
+# --- SETUP SESSION GLOBAL (Supaya koneksi tidak putus-nyambung) ---
+def get_session():
+    if "request_session" not in st.session_state:
+        session = requests.Session()
+        retries = Retry(
+            total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504]
+        )
+        session.mount("https://", HTTPAdapter(max_retries=retries))
+        st.session_state["request_session"] = session
+    return st.session_state["request_session"]
+
+
+# --- 1. FUNGSI FETCH DATA (OPTIMIZED + CACHING) ---
+# @st.cache_data membuat data tersimpan di RAM server selama 1 jam (ttl=3600)
+# Jadi kalau diklik ulang, tidak perlu fetch ke wifi.id lagi.
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_usage_data(session_id, vo_id, loc_id, start_date, end_date):
     url = "https://venue.wifi.id/vdash/dashboard/plinechart?"
+
+    # Gunakan Session yang persisten
+    s = get_session()
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Cookie": f"PHPSESSID={session_id}",
         "X-Requested-With": "XMLHttpRequest",
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     }
+
     s_date_clean = start_date.strftime("%Y%m%d")
     e_date_clean = end_date.strftime("%Y%m%d")
+
     payload = {
         "optionsRadios": "3",
         "startdate": s_date_clean,
@@ -124,54 +148,49 @@ def fetch_usage_data(session_id, vo_id, loc_id, start_date, end_date, max_retrie
         "sitename": "",
     }
 
-    for attempt in range(max_retries):
+    try:
+        # Timeout dinaikkan ke 60 detik karena server USA ke Indo pasti delay
+        response = s.post(url, headers=headers, data=payload, verify=False, timeout=60)
+
+        if response.status_code != 200:
+            return None
+
         try:
-            response = requests.post(
-                url, headers=headers, data=payload, verify=False, timeout=30
-            )
-            if response.status_code != 200:
-                time.sleep(1)
-                continue
+            data = response.json()
+        except ValueError:
+            return None
 
-            try:
-                data = response.json()
-            except ValueError:
-                return None
+        if not data:
+            return pd.DataFrame()
 
-            if not data:
-                return pd.DataFrame()
+        df = pd.DataFrame(data)
+        if "PERIODE" in df.columns:
+            df["date"] = pd.to_datetime(df["PERIODE"], format="%Y%m%d", errors="coerce")
 
-            df = pd.DataFrame(data)
-            if "PERIODE" in df.columns:
-                df["date"] = pd.to_datetime(
-                    df["PERIODE"], format="%Y%m%d", errors="coerce"
+            # Optimasi tipe data biar hemat RAM server
+            if "USAGES" in df.columns:
+                df["usage_bytes"] = pd.to_numeric(df["USAGES"], errors="coerce").fillna(
+                    0
                 )
-                if "USAGES" in df.columns:
-                    df["usage_bytes"] = pd.to_numeric(
-                        df["USAGES"], errors="coerce"
-                    ).fillna(0)
-                    df["total_usage_gb"] = df["usage_bytes"] / (1024**3)
-                else:
-                    df["total_usage_gb"] = 0
-                if "TRAFIK" in df.columns:
-                    df["connected_user"] = (
-                        pd.to_numeric(df["TRAFIK"], errors="coerce")
-                        .fillna(0)
-                        .astype(int)
-                    )
-                else:
-                    df["connected_user"] = 0
-
-                df = df.sort_values("date")
-                return df[["date", "connected_user", "total_usage_gb"]]
+                df["total_usage_gb"] = df["usage_bytes"] / (1024**3)
             else:
-                return pd.DataFrame()
+                df["total_usage_gb"] = 0.0
 
-        except Exception:
-            time.sleep(1)
-            continue
+            if "TRAFIK" in df.columns:
+                df["connected_user"] = (
+                    pd.to_numeric(df["TRAFIK"], errors="coerce").fillna(0).astype(int)
+                )
+            else:
+                df["connected_user"] = 0
 
-    return None
+            df = df.sort_values("date")
+            # Return hanya kolom penting biar cache enteng
+            return df[["date", "connected_user", "total_usage_gb"]]
+        else:
+            return pd.DataFrame()
+
+    except Exception:
+        return None
 
 
 # --- 2. FUNGSI CHART ---
