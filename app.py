@@ -87,9 +87,15 @@ PROJECT_CONFIG = {
     "Lainnya": {"vo_id": "15557"},
 }
 
-# --- CREDENTIALS ---
-# Best Practice: Sebaiknya gunakan st.secrets di production
-USERS = {"admin": "admin123", "team_jateng": "jateng2026", "user_lapangan": "lapangan1"}
+# --- CREDENTIALS (SECURE) ---
+# Mengambil data user & password dari Streamlit Secrets
+# Jika dijalankan lokal, dia baca .streamlit/secrets.toml
+# Jika di Cloud, dia baca dari menu Settings -> Secrets
+try:
+    USERS = st.secrets["users"]
+except FileNotFoundError:
+    st.error("Settingan Password belum ada! Mohon konfigurasi Secrets terlebih dahulu.")
+    st.stop()
 
 
 # --- 1. FUNGSI FETCH DATA ---
